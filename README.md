@@ -4,8 +4,8 @@ A Samsung Galaxy S10+ (SM-G975F, Exynos 9820) with a broken screen, turned into 
 headless home server running postmarketOS.
 
 It serves files over Samba, exposes a web file manager, blocks ads for the whole network
-and reports its own health — pushing **60 MB/s over WiFi**, drawing **0.39 W** at idle,
-and lasting roughly a day unplugged, because the phone battery doubles as a built-in UPS.
+and reports its own health. It pushes **60 MB/s over WiFi**, draws **0.39 W** at idle, and
+lasts roughly a day unplugged, because the phone battery doubles as a built-in UPS.
 
 ## What runs on it
 
@@ -22,9 +22,9 @@ Everything starts on boot, verified through a full reboot.
 ## Measured numbers
 
 - **Write:** 60.8 MB/s · **Read:** 49.3 MB/s (5 GHz WiFi, over SSH)
-- **Latency:** 4 ms (down from 70–255 ms before disabling WiFi power save)
+- **Latency:** 4 ms, down from 70 to 255 ms before disabling WiFi power save
 - **Power draw:** 91 mA at 4.28 V = 0.39 W idle
-- **Temperature:** 30–36 °C under normal operation
+- **Temperature:** 30 to 36 °C under normal operation
 - **Storage:** 103 GB usable out of the 128 GB internal
 
 For comparison, an idle Raspberry Pi 4 draws 3 to 5 W.
@@ -37,8 +37,8 @@ is documented anywhere obvious.
 ### 1. Samsung's bootloader discards the boot.img cmdline
 
 The downstream kernel ships `CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y`, which killed the device
-every 2–4 minutes. The obvious fix is passing `hung_task_panic=0` in the `boot.img`
-cmdline — and it **does not work**. The bootloader throws that cmdline away and injects its
+every few minutes. The obvious fix is passing `hung_task_panic=0` in the `boot.img`
+cmdline, and it **does not work**. The bootloader throws that cmdline away and injects its
 own (`androidboot.*`), as `/proc/cmdline` plainly shows.
 
 Six reflashes were done on that wrong assumption before anyone read `/proc/cmdline`. The
@@ -56,7 +56,7 @@ of room for it to apply before the first panic.
 ### 2. The WiFi driver doesn't speak the old API
 
 `iwlist` and `iwconfig` return `no wireless extensions` and `Interface doesn't support
-scanning` on Samsung's `bcmdhd` — which looks like broken hardware and isn't. The driver
+scanning` on Samsung's `bcmdhd`. That looks like broken hardware, but it isn't. The driver
 uses nl80211, so the right tool is `iw`:
 
 ```sh
@@ -67,7 +67,7 @@ iw dev wlan0 scan | grep SSID
 The firmware (`firmware-samsung-beyond2lte`) ships preinstalled in the right place. The
 interface was simply `down`.
 
-Once connected, **disable power save** — without it, ping swings between 70 and 255 ms:
+Once connected, **disable power save**. Without it, ping swings between 70 and 255 ms:
 
 ```sh
 iw dev wlan0 set power_save off   # persist via /etc/local.d/
@@ -79,8 +79,8 @@ OpenRC sources `/etc/conf.d/<service>` **before** running the init script. Any v
 init script sets directly overrides whatever you put in `conf.d`.
 
 `/etc/init.d/filebrowser` hardcodes `command_user="filebrowser:filebrowser"`, so the
-service ignored the configuration and ran as the wrong user — failing to reach its files
-and logging nothing at all. The only symptom was `status: crashed`.
+service ignored the configuration and ran as the wrong user. It failed to reach its files
+and logged nothing at all. The only symptom was `status: crashed`.
 
 To surface the real error, declare log targets in `conf.d`:
 
@@ -92,15 +92,15 @@ error_log="/var/log/service/err.log"
 ## Per-service notes
 
 - **AdGuard Home:** the router advertises *itself* as an IPv6 DNS server via Router
-  Advertisement, and clients prefer IPv6 — so blocking is silently bypassed even with DHCP
+  Advertisement, and clients prefer IPv6, so blocking is silently bypassed even with DHCP
   pointing at AdGuard. ISP-provided routers often won't let you disable this. The way out
-  is pinning DNS per client (`ipv4.ignore-auto-dns yes` + `ipv6.ignore-auto-dns yes` under
-  NetworkManager).
+  is pinning DNS per client (`ipv4.ignore-auto-dns yes` plus `ipv6.ignore-auto-dns yes`
+  under NetworkManager).
 - **filebrowser 2.27.0:** the bundled CSS ships a literal `__VITE_ASSET__` placeholder where
   the icon font URL should be, so icons render as their own names in plain text. Work
   around it with `--branding.files` and a `custom.css` embedding the font. Its database is
-  BoltDB, which allows a single process at a time — running `config set` while the service
-  is up fails with a silent timeout.
+  BoltDB, which allows a single process at a time, so running `config set` while the
+  service is up fails with a silent timeout.
 - **Battery:** `echo 60 > /sys/class/power_supply/battery/batt_full_capacity` caps charging.
   It's the same mechanism behind One UI's "Protect battery", and it matters for a device
   that stays plugged in permanently.
@@ -139,9 +139,8 @@ scripts/
 The documents under `docs/` are written in Brazilian Portuguese.
 
 The scripts in `recuperacao/` were built to catch two-minute connectivity windows between
-spontaneous reboots. Once `sysctl.d` fixed the root cause they became obsolete, and they
-remain here as a record of the technique — which may help anyone fighting an unstable
-device.
+spontaneous reboots. Once `sysctl.d` fixed the root cause they became obsolete. They remain
+here as a record of the technique, which may help anyone fighting an unstable device.
 
 ## Caveats
 
@@ -149,8 +148,8 @@ Network addresses in these documents were replaced with examples. Adjust them fo
 network before running any script.
 
 This is the record of one specific device. An unlocked bootloader means permanently blown
-Knox and a voided warranty — a deliberate choice by the owner of the hardware.
+Knox and a voided warranty, a deliberate choice by the owner of the hardware.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
