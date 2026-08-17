@@ -1,49 +1,48 @@
-# Galaxy S10+ como servidor doméstico
+# Galaxy S10+ as a home server
 
-Um Samsung Galaxy S10+ (SM-G975F, Exynos 9820) com a tela quebrada, convertido em
-servidor caseiro headless com postmarketOS.
+A Samsung Galaxy S10+ (SM-G975F, Exynos 9820) with a broken screen, turned into a
+headless home server running postmarketOS.
 
-O aparelho roda NAS por Samba, interface web de arquivos, bloqueio de anúncios para toda
-a rede e monitoramento — servindo arquivos a **60 MB/s por WiFi**, consumindo **0,39 W**
-em repouso e com autonomia de aproximadamente um dia sem tomada, porque a bateria virou
-no-break embutido.
+It serves files over Samba, exposes a web file manager, blocks ads for the whole network
+and reports its own health — pushing **60 MB/s over WiFi**, drawing **0.39 W** at idle,
+and lasting roughly a day unplugged, because the phone battery doubles as a built-in UPS.
 
-## O que roda
+## What runs on it
 
-| Serviço | Função |
+| Service | Purpose |
 |---|---|
-| Samba | compartilhamento de arquivos na rede |
-| filebrowser | interface web de arquivos (upload, preview, download) |
-| AdGuard Home | DNS com bloqueio de anúncios para a rede inteira |
-| netdata | monitoramento em tempo real (CPU, temperatura, rede, disco) |
-| Tailscale | acesso remoto sem abrir portas no roteador |
+| Samba | file sharing on the local network |
+| filebrowser | web file manager (upload, preview, download) |
+| AdGuard Home | network-wide DNS ad blocking |
+| netdata | real-time monitoring (CPU, temperature, network, disk) |
+| Tailscale | remote access without opening router ports |
 
-Tudo sobe sozinho no boot, validado por reinicialização completa.
+Everything starts on boot, verified through a full reboot.
 
-## Números medidos
+## Measured numbers
 
-- **Escrita:** 60,8 MB/s · **Leitura:** 49,3 MB/s (WiFi 5 GHz, sobre SSH)
-- **Latência:** 4 ms (era 70–255 ms antes de desligar o power save do WiFi)
-- **Consumo:** 91 mA a 4,28 V = 0,39 W em repouso
-- **Temperatura:** 30–36 °C sob operação normal
-- **Espaço:** 103 GB úteis dos 128 GB internos
+- **Write:** 60.8 MB/s · **Read:** 49.3 MB/s (5 GHz WiFi, over SSH)
+- **Latency:** 4 ms (down from 70–255 ms before disabling WiFi power save)
+- **Power draw:** 91 mA at 4.28 V = 0.39 W idle
+- **Temperature:** 30–36 °C under normal operation
+- **Storage:** 103 GB usable out of the 128 GB internal
 
-Para comparação, um Raspberry Pi 4 ocioso consome de 3 a 5 W.
+For comparison, an idle Raspberry Pi 4 draws 3 to 5 W.
 
-## As três armadilhas que custaram caro
+## The three traps that cost hours
 
-Este repositório existe principalmente por causa destas. Todas consumiram horas e nenhuma
-está documentada de forma óbvia em outro lugar.
+This repository exists mostly because of these. Each one burned significant time, and none
+is documented anywhere obvious.
 
-### 1. O bootloader da Samsung ignora o cmdline do boot.img
+### 1. Samsung's bootloader discards the boot.img cmdline
 
-O kernel downstream traz `CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y`, que derrubava o aparelho a
-cada 2–4 minutos. A correção parece ser passar `hung_task_panic=0` no cmdline do
-`boot.img` — e **não funciona**. O bootloader descarta esse cmdline e injeta o seu próprio
-(`androidboot.*`), como se vê em `/proc/cmdline`.
+The downstream kernel ships `CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y`, which killed the device
+every 2–4 minutes. The obvious fix is passing `hung_task_panic=0` in the `boot.img`
+cmdline — and it **does not work**. The bootloader throws that cmdline away and injects its
+own (`androidboot.*`), as `/proc/cmdline` plainly shows.
 
-Seis reflashes foram feitos sobre essa premissa errada antes de alguém ler o
-`/proc/cmdline`. A correção que funciona é em espaço de usuário:
+Six reflashes were done on that wrong assumption before anyone read `/proc/cmdline`. The
+fix that works lives in userspace:
 
 ```sh
 # /etc/sysctl.d/99-hungtask.conf
@@ -51,100 +50,107 @@ kernel.hung_task_panic = 0
 kernel.hung_task_timeout_secs = 0
 ```
 
-O serviço `sysctl` já está no runlevel `boot`, e o timeout de 120 s dá margem de sobra
-para ele ser aplicado antes do primeiro panic.
+The `sysctl` service is already in the `boot` runlevel, and the 120 s timeout leaves plenty
+of room for it to apply before the first panic.
 
-### 2. O driver de WiFi não fala a API antiga
+### 2. The WiFi driver doesn't speak the old API
 
-`iwlist` e `iwconfig` respondem `no wireless extensions` / `Interface doesn't support
-scanning` no `bcmdhd` da Samsung — o que parece rádio quebrado e não é. O driver usa
-nl80211; a ferramenta certa é o `iw`:
+`iwlist` and `iwconfig` return `no wireless extensions` and `Interface doesn't support
+scanning` on Samsung's `bcmdhd` — which looks like broken hardware and isn't. The driver
+uses nl80211, so the right tool is `iw`:
 
 ```sh
 apk add iw
 iw dev wlan0 scan | grep SSID
 ```
 
-O firmware (`firmware-samsung-beyond2lte`) já vem instalado e no lugar certo. A interface
-estava apenas `down`.
+The firmware (`firmware-samsung-beyond2lte`) ships preinstalled in the right place. The
+interface was simply `down`.
 
-E depois de conectar, **desligue o power save** — sem isso o ping oscila entre 70 e 255 ms:
-
-```sh
-iw dev wlan0 set power_save off   # persistir em /etc/local.d/
-```
-
-### 3. O `conf.d` do OpenRC não vence o init script
-
-O OpenRC carrega `/etc/conf.d/<serviço>` **antes** de executar o init script. Qualquer
-variável que o init script defina diretamente sobrescreve o que você pôs no `conf.d`.
-
-O `/etc/init.d/filebrowser` traz `command_user="filebrowser:filebrowser"` fixo, então o
-serviço ignorava a configuração e rodava como o usuário errado — falhando ao acessar
-arquivos, sem escrever nada em log. O sintoma era só `status: crashed`.
-
-Para ver o erro real, declare os logs no `conf.d`:
+Once connected, **disable power save** — without it, ping swings between 70 and 255 ms:
 
 ```sh
-output_log="/var/log/servico/out.log"
-error_log="/var/log/servico/err.log"
+iw dev wlan0 set power_save off   # persist via /etc/local.d/
 ```
 
-## Detalhes por serviço
+### 3. OpenRC's conf.d loses to the init script
 
-- **AdGuard Home:** o roteador anuncia a si mesmo como DNS IPv6 via Router Advertisement,
-  e os clientes preferem IPv6 — então o bloqueio é contornado silenciosamente, mesmo com o
-  DHCP apontando para o AdGuard. Roteadores de operadora frequentemente não permitem
-  desligar isso. A saída é fixar o DNS por cliente (`ipv4.ignore-auto-dns yes` +
-  `ipv6.ignore-auto-dns yes` no NetworkManager).
-- **filebrowser 2.27.0:** o CSS empacotado vem com `__VITE_ASSET__` literal no lugar da URL
-  da fonte, e os ícones aparecem como texto. Contornável via `--branding.files` com um
-  `custom.css` que embute a fonte. O banco é BoltDB: aceita um processo por vez, então
-  `config set` com o serviço no ar falha por timeout silenciosamente.
-- **Bateria:** `echo 60 > /sys/class/power_supply/battery/batt_full_capacity` limita a
-  carga — é o mesmo mecanismo do "Proteger bateria" do One UI. Importante para um aparelho
-  que fica permanentemente na tomada.
-- **netdata:** configurado com `[db] mode = ram`. O storage interno não é substituível, e
-  não vale gastá-lo gravando métricas.
+OpenRC sources `/etc/conf.d/<service>` **before** running the init script. Any variable the
+init script sets directly overrides whatever you put in `conf.d`.
 
-## Sobre o load average
+`/etc/init.d/filebrowser` hardcodes `command_user="filebrowser:filebrowser"`, so the
+service ignored the configuration and ran as the wrong user — failing to reach its files
+and logging nothing at all. The only symptom was `status: crashed`.
 
-O sistema mostra load average em torno de 11 com a CPU 97% ociosa e o aparelho a 30 °C.
-São threads de kernel do TrustZone da Samsung (`tz_worker_thread`, `tz_iwsock`,
-`ree_time`) presas em estado `D`, esperando um secure world que o postmarketOS nunca
-inicializa. Estado `D` entra no cálculo do load sem consumir CPU. É cosmético.
+To surface the real error, declare log targets in `conf.d`:
 
-## Ferramentas de gravação
+```sh
+output_log="/var/log/service/out.log"
+error_log="/var/log/service/err.log"
+```
 
-O `odin4` falha em arquivos grandes (`ioctl bulk write Fail` por volta dos 50% em um
-arquivo de 503 MB), mas funciona bem para imagens pequenas. Para o resto, o TWRP na
-recovery é o caminho confiável: root sem senha, `adb push` a ~35 MB/s e `dd` a 157 MB/s.
+## Per-service notes
 
-Combinações de botões (com a tela quebrada, é às cegas):
+- **AdGuard Home:** the router advertises *itself* as an IPv6 DNS server via Router
+  Advertisement, and clients prefer IPv6 — so blocking is silently bypassed even with DHCP
+  pointing at AdGuard. ISP-provided routers often won't let you disable this. The way out
+  is pinning DNS per client (`ipv4.ignore-auto-dns yes` + `ipv6.ignore-auto-dns yes` under
+  NetworkManager).
+- **filebrowser 2.27.0:** the bundled CSS ships a literal `__VITE_ASSET__` placeholder where
+  the icon font URL should be, so icons render as their own names in plain text. Work
+  around it with `--branding.files` and a `custom.css` embedding the font. Its database is
+  BoltDB, which allows a single process at a time — running `config set` while the service
+  is up fails with a silent timeout.
+- **Battery:** `echo 60 > /sys/class/power_supply/battery/batt_full_capacity` caps charging.
+  It's the same mechanism behind One UI's "Protect battery", and it matters for a device
+  that stays plugged in permanently.
+- **netdata:** configured with `[db] mode = ram`. The internal storage can't be replaced,
+  so it isn't worth spending write cycles on metrics.
 
-- **Download Mode:** Volume Baixo + Bixby + Power
-- **Recovery:** Volume Cima + Bixby + Power
+## About the load average
 
-## Estrutura
+The system reports a load average around 11 while the CPU sits 97% idle and the device runs
+at 30 °C. Those are Samsung TrustZone kernel threads (`tz_worker_thread`, `tz_iwsock`,
+`ree_time`) stuck in `D` state, waiting on a secure world postmarketOS never initializes.
+`D` state counts toward load without consuming CPU. It's cosmetic.
+
+## Flashing tools
+
+`odin4` fails on large files (`ioctl bulk write Fail` around 50% of a 503 MB image) but
+handles small images fine. For everything else, TWRP in recovery is the reliable path:
+passwordless root, `adb push` at ~35 MB/s and `dd` at 157 MB/s.
+
+Button combos (blind, with a broken screen):
+
+- **Download Mode:** Volume Down + Bixby + Power
+- **Recovery:** Volume Up + Bixby + Power
+
+## Layout
 
 ```
 docs/
-  plano-tecnico.md      análise mainline vs downstream, topologia, fases
-  recuperacao-boot.md   diagnóstico do bootloop e técnicas de gravação
+  plano-tecnico.md      mainline vs downstream analysis, topology, phases
+  recuperacao-boot.md   bootloop diagnosis and flashing techniques
 scripts/
-  wifi-s10.sh           conecta o aparelho ao WiFi (senha vira hash local)
-  recuperacao/          scripts da fase em que o sistema reiniciava sozinho
+  wifi-s10.sh           connects the device to WiFi (passphrase hashed locally)
+  recuperacao/          scripts from the era when the system rebooted on its own
 ```
 
-Os scripts em `recuperacao/` esperavam janelas de conectividade de dois minutos entre
-reinicializações. Depois que o `sysctl.d` resolveu o problema na raiz, ficaram obsoletos —
-estão aqui como registro da técnica, que pode servir a quem enfrentar um aparelho instável.
+The documents under `docs/` are written in Brazilian Portuguese.
 
-## Aviso
+The scripts in `recuperacao/` were built to catch two-minute connectivity windows between
+spontaneous reboots. Once `sysctl.d` fixed the root cause they became obsolete, and they
+remain here as a record of the technique — which may help anyone fighting an unstable
+device.
 
-Os endereços de rede nos documentos foram trocados por exemplos. Ajuste para a sua rede
-antes de usar qualquer script.
+## Caveats
 
-Este é o registro de um aparelho específico. Bootloader desbloqueado significa Knox
-queimado permanentemente e garantia perdida — decisão consciente de quem é dono do
-aparelho.
+Network addresses in these documents were replaced with examples. Adjust them for your own
+network before running any script.
+
+This is the record of one specific device. An unlocked bootloader means permanently blown
+Knox and a voided warranty — a deliberate choice by the owner of the hardware.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
