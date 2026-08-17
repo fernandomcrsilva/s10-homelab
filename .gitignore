@@ -1,0 +1,23 @@
+# nada de credenciais ou dados de infraestrutura
+*.json
+*.key
+*.pem
+id_*
+*_deploy
+.env
+
+# imagens de firmware e artefatos de flash (grandes e especificos do aparelho)
+*.img
+*.tar
+*.bin
+*-state
+*.log
+
+# originais nao sanitizados (as versoes publicaveis estao em docs/)
+/s10-coolify.md
+/briefing-s10-estado.md
+/wifi-s10.sh
+/injeta-chave.sh
+/sonda.sh
+/estabiliza.sh
+/fixa.sh
