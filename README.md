@@ -1,4 +1,4 @@
-# Galaxy S10+ as a home server
+# Phone Homelab
 
 A Samsung Galaxy S10+ (SM-G975F, Exynos 9820) with a broken screen, turned into a
 headless home server running postmarketOS.
