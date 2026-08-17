@@ -1,23 +1,8 @@
-# nada de credenciais ou dados de infraestrutura
-*.json
-*.key
-*.pem
-id_*
-*_deploy
-.env
+# Local working files: originals with real addresses and keys, unrelated
+# backups, anything not meant for the public repository.
+/local/
 
-# imagens de firmware e artefatos de flash (grandes e especificos do aparelho)
+# Firmware images and flash packages: too large for git and specific to one
+# device.
 *.img
 *.tar
-*.bin
-*-state
-*.log
-
-# originais nao sanitizados (as versoes publicaveis estao em docs/)
-/s10-coolify.md
-/briefing-s10-estado.md
-/wifi-s10.sh
-/injeta-chave.sh
-/sonda.sh
-/estabiliza.sh
-/fixa.sh
