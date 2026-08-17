@@ -1,4 +1,4 @@
-# Phone Homelab
+# Phone as a Homelab
 
 Turn an old Android phone into a real home server with postmarketOS: network file storage,
 a web file manager, network-wide ad blocking, remote access and monitoring.
@@ -515,11 +515,21 @@ anything that matters.
 
 ```
 docs/
-  plano-tecnico.md      mainline vs downstream analysis, topology, phases
-  recuperacao-boot.md   bootloop diagnosis and flashing techniques
+  technical-plan.md     mainline vs downstream analysis, topology, phases
+  boot-recovery.md      bootloop diagnosis and flashing techniques
 scripts/
-  wifi-s10.sh           connects the device to WiFi (passphrase hashed locally)
-  recuperacao/          scripts for catching connectivity windows on an unstable device
+  wifi-setup.sh         connects the device to WiFi (passphrase hashed locally)
+  recovery/             scripts for catching connectivity windows on an unstable device
+    inject-key.sh       installs your SSH key, fixing StrictModes permissions
+    probe.sh            dumps privilege, partition and hung-task state
+    stabilize.sh        disables the panic via passwordless sudo, if available
+    fix.sh              writes the permanent sysctl.d fix
+```
+
+Every script reads its target from environment variables, so nothing is hardcoded:
+
+```sh
+PHONE_HOST=172.16.42.1 PHONE_USER=user PHONE_KEY=~/.ssh/homelab ./scripts/recovery/probe.sh
 ```
 
 The documents under `docs/` are written in Brazilian Portuguese.
