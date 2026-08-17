@@ -532,7 +532,6 @@ Every script reads its target from environment variables, so nothing is hardcode
 PHONE_HOST=172.16.42.1 PHONE_USER=user PHONE_KEY=~/.ssh/homelab ./scripts/recovery/probe.sh
 ```
 
-The documents under `docs/` are written in Brazilian Portuguese.
 
 Network addresses throughout are examples. Substitute your own.
 

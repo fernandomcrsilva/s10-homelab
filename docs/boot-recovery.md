@@ -1,163 +1,179 @@
-# Briefing — Galaxy S10+ como servidor Coolify (estado em 2026-08-17 02:50)
+# Boot recovery log (state as of 2026-08-17)
 
-**Natureza do trabalho:** recuperação de um aparelho próprio, comprado e de posse do dono,
-sendo convertido em servidor doméstico com postmarketOS. Bootloader desbloqueado
-voluntariamente pelo dono (Knox já queimado, decisão consciente). Não há nada de segurança
-ofensiva, bypass de proteção de terceiros, nem contorno de autenticação alheia — todo o
-acesso é ao próprio hardware, com as chaves do próprio dono. É instalação de sistema
-operacional e diagnóstico de boot.
+Snapshot taken while the device was still stuck, written to hand the problem over to
+another session. It is kept unedited because the reasoning matters more than the outcome:
+this is what the middle of the debugging looked like, before the answer was found.
 
----
-
-## Objetivo final
-
-Samsung Galaxy S10+ (SM-G975F, Exynos, touchscreen quebrado) rodando postmarketOS +
-Docker + Coolify, headless, administrado por um desktop CachyOS via cabo USB-C que fornece
-energia e rede ao mesmo tempo. Plano completo em [s10-coolify.md](s10-coolify.md).
-
-Port em uso: **beyond2lte-downstream** (kernel 4.14), reativado de `device/archived/`.
-O mainline `exynos9820` foi descartado por falta de drivers de cpufreq/cpuidle
-(corte térmico em menos de 2 min sob carga — fatal para um PaaS que faz builds).
+**Nature of the work:** recovering a phone owned by the person working on it, being
+converted into a home server with postmarketOS. The bootloader was unlocked voluntarily by
+the owner (Knox already blown, a deliberate decision). Nothing here involves offensive
+security, bypassing anyone else's protection, or circumventing someone else's
+authentication. All access is to the owner's own hardware with the owner's own keys. This
+is operating system installation and boot diagnosis.
 
 ---
 
-## Onde o projeto está
+## Goal
 
-O sistema **boota e o sshd sobe** — já foi visto respondendo com host key ED25519
-(`<host key ed25519 do aparelho>`).
-O projeto não é inviável; está preso em dois problemas concretos e bem identificados.
+Samsung Galaxy S10+ (SM-G975F, Exynos, broken touchscreen) running postmarketOS plus
+Docker and Coolify, headless, administered from a Linux desktop over a USB-C cable that
+supplies power and networking at the same time. Full plan in
+[technical-plan.md](technical-plan.md).
 
-### Problema 1 — não existe chave SSH autorizada no rootfs
+Port in use: **beyond2lte-downstream** (kernel 4.14), revived from `device/archived/`.
+The mainline `exynos9820` port was dropped for lack of cpufreq and cpuidle drivers, which
+caused a thermal cutoff in under 2 minutes under load. Fatal for a PaaS that runs builds.
 
-Descoberto nesta sessão lendo a imagem com `debugfs`: `/home/fernando/.ssh` **não existe**
-dentro do rootfs gerado (`/home/fernando` está completamente vazio; usuário é UID 10000,
-shell `/bin/ash`, home correto no `/etc/passwd`). O `pmbootstrap` não embutiu chave nenhuma
-porque o desktop não tem `~/.ssh/id_*` — só existe `~/.ssh/perry_deploy` (de outro projeto),
-que ele não reconhece como chave padrão.
+> **Later note.** The end state moved away from Coolify to a NAS, which suits the hardware
+> far better: idle CPU, no arm64 image problem, no build write amplification.
 
-Consequência: mesmo com tudo bootando perfeitamente, o SSH responde
-`Permission denied (publickey,password,keyboard-interactive)`. Não é bug de boot.
+---
 
-**Já resolvido em disco:** a imagem `g2k.img` foi preparada com a chave injetada
-via `debugfs -w` (`/home/fernando/.ssh/authorized_keys`, dono 10000:10000, modo 0600,
-diretório 0700), `e2fsck -fy` limpo depois. Falta apenas gravá-la no aparelho.
+## Where the project stands
 
-### Problema 2 — o boot.img no aparelho é de outra geração
+The system **boots and sshd comes up**, confirmed by an ED25519 host key answering. The
+project is not unfeasible; it is stuck on two concrete, well identified problems.
 
-A partição `boot` contém `boot-debug.img`, cujo cmdline é:
+### Problem 1: no authorized SSH key in the rootfs
+
+Discovered by reading the image with `debugfs`: the user's `.ssh` directory **does not
+exist** inside the generated rootfs (the home directory is completely empty; the user is
+UID 10000, shell `/bin/ash`, with the correct home in `/etc/passwd`). `pmbootstrap`
+embedded no key at all because the desktop had no `~/.ssh/id_*`, only a key with a
+different name from another project, which it does not recognize as a default key.
+
+Consequence: even with everything booting perfectly, SSH answers
+`Permission denied (publickey,password,keyboard-interactive)`. This is not a boot bug.
+
+**Already solved on disk:** the rootfs image was prepared with the key injected through
+`debugfs -w` (`authorized_keys` owned by 10000:10000, mode 0600, directory 0700), followed
+by a clean `e2fsck -fy`. All that remains is writing it to the device.
+
+### Problem 2: the boot.img on the device is from an older generation
+
+The `boot` partition holds a debug image whose cmdline is:
 
 ```
-pmos.debug-shell pmos_boot_uuid=f88bfdf4-… pmos_root_uuid=2d9ffe2f-…
+pmos.debug-shell pmos_boot_uuid=f88bfdf4-... pmos_root_uuid=2d9ffe2f-...
 ```
 
-Repare no que **falta**: `hung_task_panic=0 hung_task_timeout_secs=0`. Sem esses parâmetros
-o `CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y` do kernel downstream derruba o aparelho a cada ~2-4
-minutos (foi a causa-raiz do bootloop original, diagnosticada por `/proc/last_kmsg`).
-É por isso que o USB cai e volta o tempo todo — 5 desconexões nos últimos 20 minutos.
+Note what is **missing**: `hung_task_panic=0 hung_task_timeout_secs=0`. Without those
+parameters the downstream kernel's `CONFIG_BOOTPARAM_HUNG_TASK_PANIC=y` brings the device
+down every 2 to 4 minutes. This was the root cause of the original bootloop, diagnosed
+through `/proc/last_kmsg`. It is why USB keeps dropping and reappearing: five
+disconnections in the last 20 minutes.
 
-Além disso os UUIDs são da geração antiga. A partição `system` já foi regravada com o
-pmOS_boot da geração 3 (UUID `390e668f`), então o initramfs antigo procura um
-`pmos_boot_uuid` que não existe mais. O sistema ainda sobe às vezes porque o initramfs faz
-fallback por LABEL, o que explica o comportamento errático (ora cai no debug shell, ora
-boota o sistema real, ora reseta).
+The UUIDs are also from the old generation. The `system` partition was already rewritten
+with the generation 3 boot filesystem, so the old initramfs looks for a `pmos_boot_uuid`
+that no longer exists. The system still comes up sometimes because the initramfs falls back
+to matching by LABEL, which explains the erratic behaviour: sometimes it drops to the debug
+shell, sometimes it boots the real system, sometimes it resets.
 
-O `boot.img` correto (geração 3) está pronto em disco, com
-`hung_task_panic=0 hung_task_timeout_secs=0` e os UUIDs casando com as imagens.
+The correct generation 3 `boot.img` is ready on disk, with the hung task parameters and
+UUIDs matching the images.
 
----
-
-## O que foi conquistado nesta sessão
-
-1. **Canal de gravação sem odin4, funcionando.** Serial (`/dev/ttyACM0`, 115200) como canal
-   de controle + TCP sobre a rede USB (`ncm0` no aparelho ↔ `enp1s0f0u2` no desktop,
-   `172.16.42.1/172.16.42.2`) como canal de dados. `nc` escutando no telefone, `dd`
-   gravando direto na partição, `/dev/tcp` do bash empurrando do desktop. Roda a ~30 MB/s.
-
-2. **Partição `system` gravada e verificada por sha256** com esse método
-   (`g1.img` → `/dev/disk/by-partlabel/system`, sha `8189286b…` conferido por readback).
-   Prova que o caminho funciona fim a fim.
-
-3. **Causa da falha do odin4 confirmada.** O log da noite anterior mostra
-   `ioctl bulk write Fail: Connection timed out` aos 50% de um arquivo de 503MB.
-   O odin4 não aguenta transferências grandes — foi isso que corrompeu o pmOS_boot.
-   Não insistir nesse caminho para arquivos grandes.
-
-4. **Duas armadilhas de shell resolvidas** (custaram várias tentativas):
-   - `busybox nc -l` **não encerra no EOF** do cliente. O pipeline `nc | dd` fica pendurado
-     para sempre. Solução: `dd` com `count=` exato e `iflag=fullblock`, que termina sozinho.
-   - O eco do comando na serial contém o texto do marcador, então `grep FIM_system` casa
-     com o eco e não com a execução. Solução: `echo "FIM_"$part` (as aspas quebram o literal
-     no eco) e `grep "^FIM_"`.
+> **What this section got wrong.** The premise that a correct cmdline in `boot.img` would
+> fix the panic is false on Samsung devices: the bootloader discards that cmdline entirely
+> and injects its own `androidboot.*` parameters. The working fix turned out to be
+> `/etc/sysctl.d/99-hungtask.conf` in userspace. This document is kept as written because
+> the wrong premise here cost six reflashes, and that is the lesson.
 
 ---
 
-## O obstáculo atual
+## What this session achieved
 
-O aparelho parou de expor o console serial (`/dev/ttyACM0` sumiu) porque agora está
-bootando o sistema real em vez de parar no debug shell do initramfs. Ele **pinga**
-(`172.16.42.1` responde), mas:
+1. **A working flash channel without odin4.** Serial (`/dev/ttyACM0`, 115200) as the
+   control channel, plus TCP over USB networking (`ncm0` on the phone against the matching
+   interface on the desktop, `172.16.42.1` and `172.16.42.2`) as the data channel. `nc`
+   listening on the phone, `dd` writing straight to the partition, bash `/dev/tcp` pushing
+   from the desktop. Runs at about 30 MB/s.
 
-- sem serial → não há shell para rodar o `dd`
-- sem chave no rootfs → o SSH recusa
-- a porta 22 oscila entre aberta e fechada, acompanhando os resets do hung task panic
+2. **The `system` partition written and verified by sha256** with that method, confirmed by
+   reading it back. Proof that the path works end to end.
 
-Ou seja: o canal de gravação que funciona depende do debug shell, e o aparelho parou de
-cair nele. É preciso ou recuperar o debug shell, ou abrir outra via.
+3. **The odin4 failure confirmed.** The previous night's log shows
+   `ioctl bulk write Fail: Connection timed out` at 50% of a 503 MB file. odin4 cannot
+   sustain large transfers, and that is what corrupted the boot filesystem earlier. Do not
+   persist with it for large files.
+
+4. **Two shell traps solved**, both of which cost several attempts:
+   - `busybox nc -l` **does not terminate on client EOF**. The `nc | dd` pipeline hangs
+     forever. Solution: `dd` with an exact `count=` and `iflag=fullblock`, which finishes on
+     its own.
+   - The command echo on the serial line contains the marker text, so `grep DONE_system`
+     matches the echo rather than the execution. Solution: `echo "DONE_"$part`, where the
+     quotes break the literal in the echo, combined with `grep "^DONE_"`.
 
 ---
 
-## Arquivos em disco (todos prontos, `/mnt/0e1d08ce-7163-4836-9a14-501b1cebfcfe/scratch-s10/`)
+## The current obstacle
 
-| Arquivo | O que é | Destino | sha256 (início) |
+The device stopped exposing the serial console (`/dev/ttyACM0` disappeared) because it now
+boots the real system instead of stopping at the initramfs debug shell. It **responds to
+ping**, but:
+
+- no serial means no shell to run `dd` in
+- no key in the rootfs means SSH refuses
+- port 22 flickers between open and closed, following the hung task panic resets
+
+In other words: the flash channel that works depends on the debug shell, and the device
+stopped falling into it. Either the debug shell has to be recovered, or another route
+opened.
+
+---
+
+## Images prepared on disk
+
+| File | What it is | Target | Status |
 |---|---|---|---|
-| `g1.img` | pmOS_boot ext2, 503MB | partição `system` | `8189286b…` ✅ já gravada |
-| `g2k.img` | pmOS_root ext4, 344MB, **com a chave SSH** | partição `userdata` | `516cea9f…` |
-| `g2.img` | idem, sem a chave | — | `2afc846c…` |
-| `boot.img` | boot gen3, 52MB, cmdline correto | partição `boot` | `60bc55f7…` |
-| `boot-pad.img` | idem com padding p/ bloco de 4096 | partição `boot` | — |
+| boot filesystem, ext2, 503 MB | generation 3 | `system` partition | already written, sha verified |
+| rootfs, ext4, 344 MB, **with the SSH key** | generation 3 | `userdata` partition | pending |
+| rootfs, ext4, 344 MB, without the key | generation 3 | n/a | spare |
+| `boot.img`, 52 MB | generation 3 cmdline | `boot` partition | pending |
+| `boot-pad.img` | same, padded to a 4096 byte block | `boot` partition | pending |
 
-UUIDs da geração 3: boot `390e668f-9002-4a76-af2a-e6ad5c77b590`,
-root `5545254b-6b38-40bb-a5d0-4ae40550b5af`.
+Session scripts keep per-partition state in a file, so they resume where they stopped.
 
-Scripts da sessão: `transfer-gen3c.sh` (o que funcionou para a `system`) e
-`transfer-gen3d.sh` (variante que grava `userdata` com a chave + `boot`).
-Ambos mantêm estado por partição em arquivo, então retomam de onde pararam.
-
-Mapa de partições do aparelho: `system` = `/dev/sda25`, `userdata` = `/dev/sda31` (116GB),
-`boot` = `/dev/sda14`, `recovery` = `/dev/sda15`. Acessíveis por
-`/dev/disk/by-partlabel/<nome>`.
+Device partition map: `system` is `/dev/sda25`, `userdata` is `/dev/sda31` (116 GB), `boot`
+is `/dev/sda14`, `recovery` is `/dev/sda15`. All reachable through
+`/dev/disk/by-partlabel/<name>`.
 
 ---
 
-## Caminhos possíveis para destravar (não decididos)
+## Possible ways forward (undecided at the time)
 
-1. **Esperar/forçar uma janela de debug shell.** O aparelho ainda reseta sozinho pelo hung
-   task panic; se em algum ciclo o initramfs parar no debug shell, o `transfer-gen3d.sh`
-   pega a janela e grava `userdata` + `boot` (leva ~40 s no total). Foi o que já funcionou
-   para a `system`.
+1. **Wait for or force a debug shell window.** The device still resets on its own from the
+   hung task panic; if the initramfs stops at the debug shell on some cycle, the transfer
+   script catches that window and writes `userdata` plus `boot` in about 40 seconds. This
+   already worked for the `system` partition.
 
-2. **Download Mode + odin4 só para o `boot`.** São 52MB, abaixo do limite onde o odin4
-   falha, e gravar só o boot já resolve o Problema 2 (estabilidade + UUIDs corretos).
-   Obstáculo: entrar em Download Mode sem tela. `reboot download` do busybox **não
-   funciona** (o applet ignora o argumento). Precisaria de botões físicos
-   (Volume Down + Bixby + Power) ou de escrever o reboot reason por outro meio.
+2. **Download Mode plus odin4 for the boot image only.** It is 52 MB, below the size where
+   odin4 fails, and writing only the boot image would address Problem 2. Obstacle: entering
+   Download Mode without a screen. Busybox `reboot download` **does not work**, since the
+   applet ignores the argument. It would need the physical buttons (Volume Down, Bixby,
+   Power) or writing the reboot reason some other way.
 
-3. **TWRP na recovery.** `~/Downloads/twrp-3.7.0_9-2-beyond2lte.img` e os `.tar` já estão
-   baixados. Segundo as notas, `adb push` + `dd` pelo TWRP roda a 235 MB/s sem falhas — é
-   o caminho preferencial para arquivos grandes. Também depende de Download Mode e de
-   botões para entrar em recovery.
+3. **TWRP in recovery.** Notes say `adb push` plus `dd` through TWRP runs at 235 MB/s
+   without failures, making it the preferred path for large files. Also depends on Download
+   Mode and buttons.
 
-4. **Boot.img com initramfs modificado** que injete a chave antes de montar o rootfs.
-   Resolve tudo de uma vez e cabe no odin4 (52MB), mas ainda depende do Download Mode.
+4. **A boot.img with a modified initramfs** that injects the key before mounting the
+   rootfs. Solves everything at once and fits within odin4's limit, but still depends on
+   Download Mode.
 
-O caminho 1 é o único que não precisa de intervenção física. Os demais precisam que alguém
-segure os botões do aparelho.
+Path 1 is the only one that needs no physical intervention. The others require someone to
+hold the buttons.
+
+> **What actually happened:** path 3. The buttons were pressed, TWRP went in through odin4
+> (small file, no failure), and from the recovery shell everything else became trivial:
+> root without a password, the partition mounted directly, the fix written as a file.
 
 ---
 
-## Método (lição que já custou caro neste projeto)
+## Method (a lesson this project already paid for)
 
-A informação decisiva do bootloop esteve o tempo todo em `/proc/last_kmsg`, e só foi lida
-depois de seis reflashes baseados em teoria. Diagnóstico antes de tentativa: abrir
-visibilidade (debug shell, logs, readback com sha) vale mais que mais uma rodada de flash.
-Toda gravação nesta sessão foi verificada por readback + sha256 justamente por isso.
+The decisive information about the bootloop sat in `/proc/last_kmsg` the entire time, and
+was only read after six reflashes based on theory. Diagnosis before attempts: opening
+visibility (a debug shell, logs, read-back with sha) is worth more than one more flash
+cycle. Every write in this session was verified by read-back plus sha256 for exactly that
+reason.

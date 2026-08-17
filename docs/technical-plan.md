@@ -1,198 +1,213 @@
-# Galaxy S10+ (Exynos) como servidor Coolify
+# Galaxy S10+ (Exynos) as a Coolify server
 
-Servidor headless rodando postmarketOS + Docker + Coolify, administrado a partir do
-desktop. O celular é o servidor; o PC é o cliente.
+Headless server running postmarketOS plus Docker and Coolify, administered from a desktop.
+The phone is the server; the PC is the client.
 
-**Critério de sucesso:** UI do Coolify acessível do desktop, aparelho estável plugado por
-uma semana sem intervenção física, bateria não passando de ~70%.
+**Success criteria:** Coolify UI reachable from the desktop, device stable while plugged in
+for a week without physical intervention, battery never above roughly 70%.
 
-> **Revisão de 2026-08-15.** O plano original assumia portar `beyond1lte` → `beyond2lte`
-> sobre kernel downstream 4.14. Descoberto durante a execução: o pmaports consolidou tudo
-> em `device-samsung-exynos9820`, um port **mainline genérico** que já declara
-> `provides="device-samsung-beyond2lte"`. Não há porte a fazer. Em compensação, o kernel
-> mainline vem sem várias coisas que o downstream tinha prontas. Ver Fase 2.
+> **Note on the outcome.** This plan targets Coolify. During execution the goal changed to
+> a NAS, which fits this hardware much better: the CPU stays idle, the arm64 image problem
+> disappears, and there are no build writes wearing out the storage. The document is kept
+> as written because the port analysis, the kernel work and the flashing procedure all
+> apply regardless of what runs on top. See the README for what was actually built.
 
-## Escolha do port — leia antes
+> **Revision of 2026-08-15.** The original plan assumed porting `beyond1lte` to
+> `beyond2lte` on the downstream 4.14 kernel. Discovered during execution: pmaports
+> consolidated everything into `device-samsung-exynos9820`, a **generic mainline** port
+> that already declares `provides="device-samsung-beyond2lte"`. There is no porting to do.
+> In exchange, the mainline kernel ships without several things the downstream had ready.
+> See Phase 2.
 
-| | `exynos9820` (mainline) | `beyond2lte-downstream` (arquivado) |
+## Choosing the port, read this first
+
+| | `exynos9820` (mainline) | `beyond2lte-downstream` (archived) |
 |---|---|---|
-| Estado | `testing`, adicionado **2026-07-11**, 1 commit | Arquivado em 2026-07-12 |
-| Kernel | 7.2.0 mainline | 4.14 Android (2021), sem patches |
-| Docker | **Falta** OVERLAY_FS, BRIDGE, netfilter — corrigível por config | Tudo presente de fábrica |
-| Wifi | `BRCMFMAC` não compilado — incerto | `BCM_DHD_WLAN` + `BCM4375` prontos |
-| Charge limit | `constant_charge_voltage` (por tensão) | `store_mode` (histerese 60–70%) |
-| Init | OpenRC (o `systemd-boot` da dep é bootloader, não init) | OpenRC |
-| Manutenção | Ativa, mas embrionária | Nenhuma |
+| Status | `testing`, added **2026-07-11**, 1 commit | archived 2026-07-12 |
+| Kernel | 7.2.0 mainline | 4.14 Android (2021), unpatched |
+| Docker | **missing** OVERLAY_FS, BRIDGE, netfilter, fixable by config | all present out of the box |
+| WiFi | `BRCMFMAC` not compiled, uncertain | `BCM_DHD_WLAN` plus `BCM4375` ready |
+| Charge limit | `constant_charge_voltage` (by voltage) | `store_mode` (60 to 70% hysteresis) |
+| Init | OpenRC (the `systemd-boot` dependency is a bootloader, not an init) | OpenRC |
+| Maintenance | active but embryonic | none |
 
-**Escolhido: downstream** (revisto em 2026-08-16, durante a execução).
+**Chosen: downstream** (revised 2026-08-16, during execution).
 
-A escolha inicial foi o mainline, por segurança. Ela caiu quando o MR do port
+The initial choice was mainline, for safety. It fell apart when the port's merge request
 ([pmaports!8999](https://gitlab.postmarketos.org/postmarketOS/pmaports/-/merge_requests/8999))
-revelou dois impedimentos que nenhum config denuncia:
+revealed two blockers that no kernel config discloses:
 
-1. **Corte térmico.** Palavras do autor: *"there is no cpuidle, cpufreq or cpuhp support.
-   Stressing all 8 cores (…) bakes the SoC very quickly and it goes into thermal protection
-   (hard power cutoff) (…) in under 2 minutes."* Daí o `maxcpus=6` no cmdline. Para um PaaS
-   que vive fazendo `docker build`, isso ataca exatamente o caso de uso.
-   Cuidado ao ler o kconfig: `CPU_FREQ`/`CPU_IDLE`/`THERMAL` aparecem `=y` nos **dois**
-   configs — isso é só o framework. Os drivers do Exynos 9820 é que faltam no mainline.
-2. **Boot exige u-boot próprio.** O mainline boota por EFI a partir de um u-boot
-   customizado com driver UFS (`chiffathefox/u-boot`, branch `exynos9820`), compilado à
-   parte e gravado na partição `boot`. Não existe `boot.img` no rootfs — foi exatamente
-   nisso que o instalador recovery-zip falhou (`dd: can't open /mnt/pmOS/boot/boot.img`).
+1. **Thermal cutoff.** In the author's words: *"there is no cpuidle, cpufreq or cpuhp
+   support. Stressing all 8 cores (...) bakes the SoC very quickly and it goes into thermal
+   protection (hard power cutoff) (...) in under 2 minutes."* Hence `maxcpus=6` in the
+   cmdline. For a PaaS that constantly runs `docker build`, this hits precisely the use
+   case. Careful when reading the kconfig: `CPU_FREQ`, `CPU_IDLE` and `THERMAL` show up as
+   `=y` in **both** configs, but that is only the framework. It is the Exynos 9820 drivers
+   that are missing from mainline.
+2. **Booting requires a custom u-boot.** Mainline boots over EFI from a custom u-boot with
+   a UFS driver (`chiffathefox/u-boot`, branch `exynos9820`), compiled separately and
+   written to the `boot` partition. There is no `boot.img` in the rootfs, which is exactly
+   where the recovery-zip installer failed (`dd: can't open /mnt/pmOS/boot/boot.img`).
 
-O downstream, em contraste: drivers térmicos da Samsung completos, wifi confirmado
-funcionando pelo autor do port, `flash_method="heimdall-bootimg"` com
-`generate_bootimg="true"` (logo o recovery-zip completa), e o kernel 4.14 já traz quase
-todos os requisitos de container de fábrica.
+The downstream port, by contrast: complete Samsung thermal drivers, WiFi confirmed working
+by the port author, `flash_method="heimdall-bootimg"` with `generate_bootimg="true"` (so
+the recovery zip completes), and a 4.14 kernel that already ships nearly every container
+requirement.
 
-**Custo aceito:** kernel de 2021 sem patches de segurança, e port arquivado. Mitigável por
-ser um servidor doméstico atrás de NAT.
+**Accepted cost:** a 2021 kernel without security patches, and an archived port. Mitigated
+by this being a home server behind NAT.
 
-**Como reativar** (feito): copiar `device-samsung-beyond2lte-downstream`,
-`linux-samsung-beyond2lte-downstream` e `firmware-samsung-beyond2lte` de
-`device/archived/` para `device/testing/` e **apagar os originais** — pacote em duas
-pastas faz o pmbootstrap abortar com "found in multiple aports subfolders".
+**How to revive it** (done): copy `device-samsung-beyond2lte-downstream`,
+`linux-samsung-beyond2lte-downstream` and `firmware-samsung-beyond2lte` from
+`device/archived/` into `device/testing/` and **delete the originals**. A package present
+in two folders makes pmbootstrap abort with "found in multiple aports subfolders".
 
-## Topologia
+## Topology
 
-Cabo USB-C do celular pra porta **traseira** da placa-mãe: energia e link de administração
-no mesmo cabo. Celular em modo gadget, `172.16.42.1`, SSH por padrão.
+USB-C cable from the phone to a **rear** motherboard port: power and the administration
+link on the same cable. Phone in gadget mode, `172.16.42.1`, SSH by default.
 
-- **Energia**: a porta USB-C. Validado no Android — bateria subiu sob carga.
-- **Administração**: USB gadget, link ponto-a-ponto. Sempre disponível.
-- **Internet**: sem `BRCMFMAC` compilado, o wifi é incerto. Plano primário passa a ser
-  **NAT no PC** (apêndice) — coerente com a topologia, já que o aparelho vive plugado.
-  Se o wifi funcionar depois de habilitado, melhor: vira independente do PC.
-- **Acesso**: SSH e Coolify (`:8000`) em `172.16.42.1`.
+- **Power**: the USB-C port. Validated on Android, where the battery charged under load.
+- **Administration**: USB gadget, point to point link. Always available.
+- **Internet**: without `BRCMFMAC` compiled, WiFi is uncertain. The primary plan becomes
+  **NAT on the PC** (see the appendix), which is consistent with the topology since the
+  device lives plugged in. If WiFi works once enabled, better still: it becomes independent
+  of the PC.
+- **Access**: SSH and Coolify (`:8000`) at `172.16.42.1`.
 
 ---
 
-# Fase 0 — Antes de tocar em qualquer coisa
+# Phase 0: before touching anything
 
-## O que é irreversível
+## What is irreversible
 
-Desbloquear o bootloader **queima o e-fuse do Knox, permanentemente**. Não existe desfazer,
-nem reflashando stock. Some pra sempre: Samsung Pay, Secure Folder, e apps de banco que
-checam Knox.
+Unlocking the bootloader **blows the Knox e-fuse permanently**. There is no undo, not even
+by reflashing stock firmware. Gone for good: Samsung Pay, Secure Folder, and banking apps
+that check Knox.
 
-Ativar o toggle "OEM Unlocking" **não** queima nada — o e-fuse só vai na Fase 3, quando
-você confirmar o aviso no Download Mode.
+Enabling the "OEM Unlocking" toggle blows **nothing**. The e-fuse only goes in Phase 3,
+when you confirm the warning in Download Mode.
 
 ## Checklist
 
-| Verificar | Estado |
+| Check | Status |
 |---|---|
-| Modelo é Exynos | ✅ confirmado |
-| OEM Unlock ativado | ✅ feito |
-| Porta do PC aguenta | ✅ bateria subiu sob carga no Android |
-| Bateria sã (sem estufamento) | ⬜ inspeção visual |
-| Firmware stock baixado | ⬜ **pendente — é o único caminho de volta** |
-| TWRP `beyond2lte` baixado | ⬜ pendente |
+| Model is Exynos | confirmed |
+| OEM Unlock enabled | done |
+| PC port supplies enough power | battery charged under load on Android |
+| Battery healthy (no swelling) | visual inspection |
+| Stock firmware downloaded | **pending, and it is the only way back** |
+| TWRP for `beyond2lte` downloaded | pending |
 
-**Firmware stock (Linux):** CSC via `*#1234#` no discador (BR costuma ser `ZTO`), depois o
-binário do [samloader](https://github.com/samloader/samloader/releases):
+**Stock firmware (Linux):** get the CSC via `*#1234#` in the dialer (Brazil is usually
+`ZTO`), then use the [samloader](https://github.com/samloader/samloader/releases) binary:
 
 ```bash
 ./samloader -m SM-G975F -r <CSC> checkupdate
-./samloader -m SM-G975F -r <CSC> download -v <versão> -O ~/Downloads/stock
+./samloader -m SM-G975F -r <CSC> download -v <version> -O ~/Downloads/stock
 ```
 
-**TWRP:** `twrp-*-beyond2lte.img.tar` em <https://twrp.me/samsung/samsunggalaxys10plus.html>.
-Confira o codename — beyond0lte (S10e) e beyond1lte (S10) também estão listados e o errado
-não boota.
+**TWRP:** `twrp-*-beyond2lte.img.tar` from
+<https://twrp.me/samsung/samsunggalaxys10plus.html>. Check the codename carefully:
+beyond0lte (S10e) and beyond1lte (S10) are listed too, and the wrong one will not boot.
 
 ---
 
-# Fase 1 — Preparar o desktop ✅
+# Phase 1: prepare the desktop
 
 ```bash
 sudo pacman -S --needed pmbootstrap heimdall android-tools
 pmbootstrap init
 ```
 
-Work path: `/mnt/0e1d08ce-7163-4836-9a14-501b1cebfcfe/pmbootstrap` (o root só tem ~14GB
-livres; o default `~/.local/var/pmbootstrap` encheria o disco no build).
+Put the work path on a disk with room to spare. A root filesystem with 14 GB free will fill
+up during the build.
 
-Respostas: channel `edge` · vendor `samsung` · codename **`exynos9820`** · UI `none` ·
-extra `openssh` · SSH key `y` · FDE **`n`** (sem tela, não dá pra digitar senha no boot).
+Answers: channel `edge`, vendor `samsung`, codename **`exynos9820`**, UI `none`, extra
+`openssh`, SSH key `y`, full disk encryption **`n`** (with no screen, you cannot type a
+passphrase at boot).
 
-O init pergunta providers de mais de um pacote — leia o nome do pacote antes de responder:
+The init asks for providers of more than one package. Read the package name before
+answering:
 
-| Provider de | Responder |
+| Provider for | Answer |
 |---|---|
-| `postmarketos-base-ui-audio-backend` | Enter (`pulseaudio`). Irrelevante sem UI. |
+| `postmarketos-base-ui-audio-backend` | Enter (`pulseaudio`). Irrelevant without a UI. |
 | `postmarketos-base-ui-wifi` | Enter (`wpa_supplicant`). |
-| `postmarketos-usb-moded-default-profile` | **`developer`** — já é o default |
+| `postmarketos-usb-moded-default-profile` | **`developer`**, which is already the default |
 
-Em "Additional options", responda `y` e ponha **`sudo timer: True`** (evita redigitar senha
-durante os builds). O resto aceita com Enter.
+Under "Additional options", answer `y` and set **`sudo timer: True`** to avoid retyping the
+password during builds. Accept the rest with Enter.
 
-Service manager: **OpenRC**. O `systemd-boot` nas dependências do device é bootloader,
-não init.
+Service manager: **OpenRC**. The `systemd-boot` in the device dependencies is a bootloader,
+not an init system.
 
-O `developer` é crítico: o perfil `charging` exige habilitar o USB networking manualmente,
-o que num aparelho sem tela é circular — você precisaria de acesso pra criar o acesso.
+The `developer` profile is critical: the `charging` profile requires enabling USB
+networking by hand, which on a screenless device is circular, since you would need access
+in order to create access.
 
 ---
 
-# Fase 2 — Ajustar o kernel ✅ CONCLUÍDA
+# Phase 2: adjust the kernel
 
-Kernel `7.2.0-r0` compilado e verificado no `boot/config` do `.apk`: `OVERLAY_FS=m`,
-`NF_TABLES_IPV4=y`, `NFT_COMPAT=m`, `NF_NAT=y`, `BRIDGE=m`, `VETH=y`, cgroups/namespaces
-completos, USB gadget (RNDIS/NCM/DWC3), `BRCMFMAC=m`, `CHARGER_MAX77705=y`.
-Foram **duas** rodadas de build — a primeira passou no `kconfig check` mas saiu sem rede
-para container. Leia a seção do iptables legacy abaixo antes de repetir isso noutro device.
+Kernel `7.2.0-r0` compiled and verified in the `.apk`'s `boot/config`: `OVERLAY_FS=m`,
+`NF_TABLES_IPV4=y`, `NFT_COMPAT=m`, `NF_NAT=y`, `BRIDGE=m`, `VETH=y`, complete cgroups and
+namespaces, USB gadget (RNDIS/NCM/DWC3), `BRCMFMAC=m`, `CHARGER_MAX77705=y`.
 
+It took **two** build rounds. The first passed `kconfig check` and still produced a kernel
+with no container networking. Read the legacy iptables section below before repeating this
+on another device.
 
-Substitui o antigo "porte do pacote": não há porte a fazer, mas o config mainline foi
-enxugado pra telefone e falta o que Docker precisa.
+This replaces the old "port the package" step: there is no porting to do, but the mainline
+config was trimmed for phone use and lacks what Docker needs.
 
-**Não monte a lista à mão.** O pmbootstrap já traz os requisitos oficiais de container em
-`kconfigcheck.toml` (categoria `containers`, ~70 opções — bem mais que as 9 óbvias):
+**Do not assemble the list by hand.** pmbootstrap already ships the official container
+requirements in `kconfigcheck.toml` (category `containers`, around 70 options, far more
+than the 9 obvious ones):
 
 ```bash
 pmbootstrap kconfig check --categories containers linux-postmarketos-exynos9820
 ```
 
-No estado original faltavam **44**. Foram aplicadas ao
-`config-postmarketos-exynos9820.aarch64` lendo os valores direto do TOML, mais
-`BRCMFMAC`/`BRCMFMAC_SDIO`/`BRCMUTIL` como tentativa de wifi. Cinco opções ficaram em `y`
-onde o TOML pedia `m` (`VETH`, `NF_NAT`, `NETFILTER_XT_MARK`, `XT_MATCH_CONNTRACK`,
-`NET_CLS_CGROUP`) — `y` é mais forte, o check aceita como INFO.
+In the original state **44** were missing. They were applied to
+`config-postmarketos-exynos9820.aarch64` by reading values straight from the TOML, plus
+`BRCMFMAC`, `BRCMFMAC_SDIO` and `BRCMUTIL` as a WiFi attempt. Five options ended as `y`
+where the TOML asked for `m` (`VETH`, `NF_NAT`, `NETFILTER_XT_MARK`, `XT_MATCH_CONNTRACK`,
+`NET_CLS_CGROUP`). `y` is stronger, and the check accepts it as INFO.
 
-Backup do config original: `scratchpad/config-exynos9820-ORIGINAL.bak`. Não deixe `.bak`
-no diretório do pacote — o validador tenta interpretá-lo como config e falha.
+Keep a backup of the original config, but **not inside the package directory**: the
+validator tries to parse a stray `.bak` as a config and fails.
 
-O config está no `source=` do APKBUILD, logo tem `sha512sum` registrado: **editar o config
-sem regenerar o checksum faz o build falhar.** E `build` sem `--force` não faz nada — o
-pmbootstrap compara versão, não conteúdo, e considera o pacote "up to date":
+The config is listed in the APKBUILD `source=`, so it carries a `sha512sum`. **Editing the
+config without regenerating the checksum makes the build fail.** And `build` without
+`--force` does nothing at all, because pmbootstrap compares versions rather than content
+and considers the package up to date:
 
 ```bash
 pmbootstrap checksum linux-postmarketos-exynos9820 && \
 pmbootstrap build linux-postmarketos-exynos9820 --force
 ```
 
-**Gate:** compila **e** as opções sobreviveram. Não confie no `kconfig check` para isto:
-ele valida o arquivo de texto, não o Kconfig real do kernel. Extraia `boot/config` do
-`.apk` gerado e compare — é a única fonte de verdade.
+**Gate:** it compiles **and** the options survived. Do not trust `kconfig check` for this:
+it validates the text file, not the kernel's real Kconfig. Extract `boot/config` from the
+generated `.apk` and compare. That is the only source of truth.
 
-### O iptables legacy não existe no kernel 7.2
+### Legacy iptables does not exist in kernel 7.2
 
-Na primeira rodada, 16 das 44 opções sumiram do kernel compilado. Não foram desabilitadas:
-**não existem** no Kconfig do 7.2. As tabelas legacy do iptables (`IP_NF_FILTER`,
-`IP_NF_NAT`, `IP_NF_MANGLE`, `IP_NF_RAW`, `IP_NF_TARGET_MASQUERADE`,
-`IP_NF_TARGET_REDIRECT` e os equivalentes `IP6_NF_*`, mais `NFT_NAT`, `NFT_FIB*`,
-`BRIDGE_VLAN_FILTERING`) foram removidas. Sobraram só matches pontuais.
+On the first round, 16 of the 44 options vanished from the compiled kernel. They were not
+disabled: they **do not exist** in the 7.2 Kconfig. The legacy iptables tables
+(`IP_NF_FILTER`, `IP_NF_NAT`, `IP_NF_MANGLE`, `IP_NF_RAW`, `IP_NF_TARGET_MASQUERADE`,
+`IP_NF_TARGET_REDIRECT`, their `IP6_NF_*` equivalents, plus `NFT_NAT`, `NFT_FIB*` and
+`BRIDGE_VLAN_FILTERING`) were removed. Only isolated matches remain.
 
-O `kconfigcheck.toml` do pmaports foi escrito para kernels com iptables legacy e não
-reflete isso — por isso o check "passou" enquanto o kernel real não tinha nada daquilo.
+The pmaports `kconfigcheck.toml` was written for kernels with legacy iptables and does not
+reflect this, which is why the check "passed" while the real kernel had none of it.
 
-No 7.2 tudo passa por **nftables**, com `NFT_COMPAT` traduzindo as chamadas do userspace.
-O que de fato precisa estar ligado, e vinha desligado:
+In 7.2 everything goes through **nftables**, with `NFT_COMPAT` translating userspace calls.
+What actually needs to be enabled, and came disabled:
 
 ```
-CONFIG_NF_TABLES_IPV4=y      # sem isto NÃO HÁ NAT ipv4 — Docker não faz port mapping
+CONFIG_NF_TABLES_IPV4=y      # without this there is NO ipv4 NAT, so Docker cannot port map
 CONFIG_NF_TABLES_IPV6=y
 CONFIG_NF_TABLES_INET=y
 CONFIG_NF_TABLES_BRIDGE=m
@@ -203,107 +218,119 @@ CONFIG_NFT_LIMIT=m
 CONFIG_VLAN_8021Q=m
 ```
 
-Já vinham corretos: `NF_TABLES=m`, `NFT_COMPAT=m`, `NFT_MASQ=m`, `NFT_CT=m`,
+Already correct: `NF_TABLES=m`, `NFT_COMPAT=m`, `NFT_MASQ=m`, `NFT_CT=m`,
 `NF_NAT_MASQUERADE=y`, `IP_NF_IPTABLES=y`, `IP6_NF_IPTABLES=y`.
 
-As 16 inexistentes seguem escritas no config — o Kbuild as ignora, são inócuas. Ficam ali
-só para o `kconfig check` não travar builds futuros. **Não são prova de nada.**
+The 16 nonexistent options remain written in the config. Kbuild ignores them, so they are
+harmless. They stay only to keep `kconfig check` from blocking future builds. **They prove
+nothing.**
 
 ---
 
-# Fase 3 — Instalar e flashar
+# Phase 3: install and flash
 
-Ponto sem volta. Daqui em diante, voltar significa flashar firmware stock.
+Point of no return. From here on, going back means flashing stock firmware.
 
-**O rootfs não vai por heimdall** (`flash_method="none"`: *"Heimdall fails mid-transfer when
-flashing rootfs. Use TWRP instead"*). Vai como **zip via ADB sideload no TWRP**, conforme o
-wiki do device. O heimdall só serve pra pôr o TWRP na recovery.
+**The rootfs does not go through heimdall** (`flash_method="none"`: *"Heimdall fails
+mid-transfer when flashing rootfs. Use TWRP instead"*). It goes as a **zip via ADB sideload
+in TWRP**, per the device wiki. Heimdall is only used to put TWRP into recovery.
 
-## 3.1 Gerar o zip
+## 3.1 Generate the zip
 
 ```bash
 pmbootstrap install --android-recovery-zip --recovery-install-partition data
 ```
 
-Instalar na partição `data` é o que dá espaço ao Docker — é a maior do aparelho (~100GB).
-Saída: `pmos-samsung-exynos9820.zip` (nosso codename é `exynos9820`; o wiki ainda descreve
-o port antigo `beyond2lte` out-of-tree, mas o procedimento de flash é o mesmo).
+Installing to the `data` partition is what gives Docker room, since it is the largest on
+the device at around 100 GB.
 
-## 3.2 Desbloquear o bootloader — **Knox queima aqui**
+## 3.2 Unlock the bootloader, where Knox blows
 
-Download Mode (desligado → Volume Down + Bixby + Power, ou plugado segurando
-Volume Down + Bixby) → Volume Up para confirmar o aviso. O aparelho faz factory reset.
+Download Mode (powered off, then Volume Down plus Bixby plus Power, or plug in while
+holding Volume Down plus Bixby), then Volume Up to confirm the warning. The device factory
+resets.
 
-Depois disso, **passe pelo setup do Android e reative o OEM Unlocking** nas opções do
-desenvolvedor. O VaultKeeper bloqueia o flash até isso, e o heimdall falha com um erro
-que não explica a causa.
+After that, **go through Android setup and re-enable OEM Unlocking** in developer options.
+VaultKeeper blocks flashing until you do, and heimdall fails with an error that does not
+explain the cause.
 
-## 3.3 TWRP na recovery
+## 3.3 TWRP into recovery
 
-Heimdall com a imagem do TWRP para `beyond2lte` (<https://twrp.me/samsung/samsunggalaxys10plus.html>).
-Booteie direto no TWRP depois: **Volume Up + Bixby + Power**.
+Heimdall with the TWRP image for `beyond2lte`
+(<https://twrp.me/samsung/samsunggalaxys10plus.html>). Boot straight into TWRP afterwards:
+**Volume Up plus Bixby plus Power**.
 
-## 3.4 Sideload do pmOS
+## 3.4 Sideload postmarketOS
 
-No TWRP, nesta ordem:
+In TWRP, in this order:
 
-1. **Mount → desmarque `Data`.** O wiki é enfático: a partição precisa estar desmontada.
-2. Advanced → ADB Sideload
+1. **Mount, then uncheck `Data`.** The wiki is emphatic: the partition must be unmounted.
+2. Advanced, then ADB Sideload
 
 ```bash
 adb sideload pmos-samsung-exynos9820.zip
 ```
 
-**Gate:** `ssh fernando@172.16.42.1` responde. Tela apagada com SSH vivo = sucesso.
+**Gate:** SSH to `172.16.42.1` answers. A dark screen with SSH alive means success.
 
 ---
 
-# Fase 4 — Calibração no hardware
+# Phase 4: calibration on real hardware
 
-## 4.1 Limite de carga (primeiro, sempre)
+## 4.1 Charge limit, always first
 
-O mainline não tem o `store_mode` da Samsung. O driver `max77705_charger` expõe
-`CONSTANT_CHARGE_VOLTAGE` — limite por tensão de flutuação, que é o método clássico:
+Mainline lacks Samsung's `store_mode`. The `max77705_charger` driver exposes
+`CONSTANT_CHARGE_VOLTAGE`, a float voltage limit, which is the classic method:
 
 ```bash
 ls /sys/class/power_supply/*/
-# procure constant_charge_voltage (µV). 4400000 ≈ 100%, ~3950000 ≈ 65%
+# look for constant_charge_voltage (µV). 4400000 is roughly 100%, 3950000 roughly 65%
 echo 3950000 > /sys/class/power_supply/<charger>/constant_charge_voltage
 ```
 
-Persista num unit systemd. Confirme que pegou observando `capacity` estabilizar.
+Persist it in a service. Confirm it took effect by watching `capacity` level off.
 
-Se a propriedade for somente-leitura, o fallback é script de user space alternando
-`ONLINE`/`STATUS` por histerese — e aí o downstream (com `store_mode`) volta a ser tentador.
+If the property is read only, the fallback is a userspace script toggling `ONLINE` and
+`STATUS` by hysteresis, at which point the downstream port (with `store_mode`) becomes
+tempting again.
 
-## 4.2 Corrente de entrada
+> **What was actually used:** the downstream port, and therefore
+> `echo 60 > /sys/class/power_supply/battery/batt_full_capacity`, which is the same
+> mechanism as One UI's "Protect battery". Status turns to `Not charging` at the cap.
 
-Validado na Fase 0 (bateria subiu sob carga). Se mudar de porta ou cabo, o knob é
-`input_current_limit` no mesmo diretório. Confira uma vez sob `docker build` real.
+## 4.2 Input current
+
+Validated in Phase 0 (battery charged under load). If you change port or cable, the knob is
+`input_current_limit` in the same directory. Check it once under a real `docker build`.
 
 ## 4.3 Internet
 
-Tente o wifi primeiro, agora que `BRCMFMAC` foi compilado:
+Try WiFi first, now that `BRCMFMAC` has been compiled:
 
 ```bash
-nmcli device wifi connect "<SSID>" password "<senha>" && ping -c3 1.1.1.1
+nmcli device wifi connect "<SSID>" password "<passphrase>" && ping -c3 1.1.1.1
 ```
 
-Funcionou? Servidor independente do PC — reserve o IP no roteador pelo MAC.
-Não funcionou? Vá pro apêndice (NAT). O link USB é ponto-a-ponto e **não** dá internet
-sozinho, e sem internet nada da Fase 5 roda.
+If it works, the server becomes independent of the PC. Reserve its IP on the router by MAC.
+If it does not, go to the NAT appendix. The USB link is point to point and does **not**
+provide internet on its own, and without internet nothing in Phase 5 runs.
 
-## 4.4 Teste de religamento
+> **On the downstream port** the tools differ: `iwlist` and `iwconfig` report
+> `no wireless extensions` because `bcmdhd` speaks nl80211. Use `iw`. Also disable WiFi
+> power save, or latency swings between 70 and 255 ms.
 
-`poweroff`, reconecte energia, veja se volta sozinho. Descubra agora, não às 3h da manhã.
+## 4.4 Power cycle test
+
+`poweroff`, reconnect power, see whether it comes back on its own. Find out now, not at
+3 in the morning.
 
 ---
 
-# Fase 5 — Docker + Coolify
+# Phase 5: Docker and Coolify
 
-## 5.1 Limite de log (antes do primeiro container)
+## 5.1 Log limits, before the first container
 
-O storage é UFS soldado; se morrer, morreu o servidor. `/etc/docker/daemon.json`:
+The storage is soldered UFS; if it dies, the server dies. `/etc/docker/daemon.json`:
 
 ```json
 { "log-driver": "local", "log-opts": { "max-size": "10m", "max-file": "3" } }
@@ -311,74 +338,73 @@ O storage é UFS soldado; se morrer, morreu o servidor. `/etc/docker/daemon.json
 
 ## 5.2 Coolify
 
-O instalador oficial suporta `postmarketos` nominalmente, com branch dedicado pra OpenRC
-(`apk add docker docker-cli-compose` + `rc-update add docker default`):
+The official installer nominally supports `postmarketos`, with a dedicated branch for
+OpenRC (`apk add docker docker-cli-compose` plus `rc-update add docker default`):
 
 ```bash
 curl -fsSL https://cdn.coollabs.io/coolify/install.sh | sh
 ```
 
-UI em `http://172.16.42.1:8000`.
+UI at `http://172.16.42.1:8000`.
 
-**Gate:** UI carrega do desktop e um deploy de teste (imagem `arm64`) sobe.
+**Gate:** the UI loads from the desktop and a test deployment (an `arm64` image) comes up.
 
-Ressalva ARM64: parte do catálogo one-click não publica imagem `arm64`. Builda na mão.
+ARM64 caveat: part of the one-click catalog publishes no `arm64` image. Those need building
+by hand. This caveat is the main reason the project moved to a NAS instead.
 
 ---
 
-# Fase 6 — Operação
+# Phase 6: operation
 
-- **Fora de casa**: `tailscale` → IP estável sem abrir porta.
-- **Apps publicados**: Cloudflare Tunnel, integrado no Coolify.
-- **Backup**: `/data/coolify` pra fora do aparelho. O UFS é o ponto único de falha.
+- **Away from home**: `tailscale` gives a stable address without opening a port.
+- **Published apps**: Cloudflare Tunnel, integrated into Coolify.
+- **Backup**: `/data/coolify` off the device. The UFS is the single point of failure.
 
 ---
 
 # Rollback
 
-| Situação | Saída |
+| Situation | Way out |
 |---|---|
-| Não bootou / sem SSH | Download Mode → Heimdall com o firmware stock da Fase 0 |
-| Mainline inviável (Docker/wifi/bateria) | Reativar `device/archived/*beyond2lte-downstream` |
-| Kernel quebrado após rebuild | Reflash do kernel anterior |
+| Did not boot, no SSH | Download Mode, then heimdall with the Phase 0 stock firmware |
+| Mainline unworkable (Docker, WiFi, battery) | Revive `device/archived/*beyond2lte-downstream` |
+| Kernel broken after a rebuild | Reflash the previous kernel |
 
 ---
 
-# Riscos conhecidos
+# Known risks
 
-| Risco | Estado |
+| Risk | Status |
 |---|---|
-| Knox queimado | Aceito conscientemente. Irreversível. |
-| Port mainline com 1 mês de vida | **Aceito** — é o risco central do projeto. Fallback documentado. |
-| Charge limit por tensão | **Em aberto** — Fase 4.1. Se a propriedade for read-only, reavaliar. |
-| Wifi no mainline | **Em aberto** — Fase 4.3. NAT cobre. |
-| Flash por TWRP não documentado aqui | **Em aberto** — confirmar no wiki antes da Fase 3. |
-| Não religa sozinho | **Em aberto** — Fase 4.4. |
-| Bateria drena com cabo | Descartado — testado no Android. |
-| Desgaste do UFS | Mitigado: limite de log + backup externo. |
-| Tela não acende | Irrelevante em headless. |
+| Knox blown | Consciously accepted. Irreversible. |
+| Mainline port one month old | **Accepted**, the central risk of the project. Fallback documented. |
+| Charge limit by voltage | **Open**, Phase 4.1. Reassess if the property is read only. |
+| WiFi on mainline | **Open**, Phase 4.3. NAT covers it. |
+| TWRP flashing not documented here | **Open**, confirm on the wiki before Phase 3. |
+| Does not power on by itself | **Open**, Phase 4.4. |
+| Battery drains while cabled | Ruled out, tested on Android. |
+| UFS wear | Mitigated by log limits and external backup. |
+| Screen does not light up | Irrelevant when headless. |
 
 ---
 
-# Apêndice — internet pelo cabo (NAT no PC)
+# Appendix: internet over the cable (NAT on the PC)
 
-Provável caminho principal, dado o wifi incerto. Custo: sem internet quando o PC estiver
-desligado.
+Likely the main path, given uncertain WiFi. Cost: no internet while the PC is off.
 
-Neste desktop: saída pela `enp5s0` (192.168.1.10), `ip_forward` já ligado, **ufw ativo**.
-
-Em `/etc/default/ufw`:
+On the desktop, with `eth0` standing in for your internet interface and `ufw` active, set
+in `/etc/default/ufw`:
 
 ```
 DEFAULT_FORWARD_POLICY="ACCEPT"
 ```
 
-No topo de `/etc/ufw/before.rules`, antes do `*filter`:
+At the top of `/etc/ufw/before.rules`, before `*filter`:
 
 ```
 *nat
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s 172.16.42.0/24 -o enp5s0 -j MASQUERADE
+-A POSTROUTING -s 172.16.42.0/24 -o eth0 -j MASQUERADE
 COMMIT
 ```
 
@@ -386,7 +412,7 @@ COMMIT
 sudo ufw reload
 ```
 
-No celular:
+On the phone:
 
 ```bash
 ip route add default via 172.16.42.2
@@ -395,9 +421,9 @@ echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 ---
 
-# Referências
+# References
 
-- device mainline: `device/testing/device-samsung-exynos9820` no pmaports
+- mainline device: `device/testing/device-samsung-exynos9820` in pmaports
 - kernel: https://github.com/chiffathefox/exynos-9820-mainline-linux
-- wiki do S10+: https://wiki.postmarketos.org/wiki/Samsung_Galaxy_S10%2B_(samsung-beyond2lte)
+- S10+ wiki: https://wiki.postmarketos.org/wiki/Samsung_Galaxy_S10%2B_(samsung-beyond2lte)
 - Coolify: https://coolify.io/docs/get-started/installation
