@@ -1,7 +1,8 @@
 # Phone as a Homelab
 
 Turn an old Android phone into a real home server with postmarketOS: network file storage,
-a web file manager, network-wide ad blocking, remote access and monitoring.
+a web file manager, network-wide ad blocking, remote access, monitoring, and encrypted
+backup to object storage.
 
 This is a step by step guide, written from an actual build on a Samsung Galaxy S10+
 (SM-G975F, Exynos 9820) with a broken touchscreen. Every command here was run on that
@@ -17,6 +18,7 @@ far more time than the successes.
 | AdGuard Home | network-wide DNS ad blocking | 80, 53 |
 | netdata | real-time monitoring | 19999 |
 | Tailscale | remote access without opening router ports | n/a |
+| restic | encrypted daily backup to object storage | n/a |
 
 Measured on the finished build:
 
@@ -468,7 +470,103 @@ your device lacks `batt_full_capacity`, look for `store_mode` in the same direct
 
 Other vendors expose different paths. Check `ls /sys/class/power_supply/battery/`.
 
-## Step 15: Verify it survives a reboot
+## Step 15: Back up to object storage
+
+Everything until here builds a server. This step is what makes the server disposable, which
+matters because phone storage is soldered and cannot be replaced when it fails.
+
+Use `restic` rather than a plain copy. It encrypts before uploading, so the storage provider
+never sees your files, and it backs up incrementally, so a daily run costs seconds instead
+of minutes.
+
+```sh
+sudo apk add restic
+```
+
+Create a bucket on any S3-compatible storage. Cloudflare R2 fits well here: 10 GB free, and
+no egress fee, so restoring costs nothing. Note that R2 credentials for S3 access must be
+created in the dashboard (R2, then Manage R2 API Tokens); the API only issues temporary
+ones. Scope the token to that single bucket.
+
+Store the credentials and a generated repository password on the device, readable only by
+root:
+
+```sh
+sudo sh -c 'cat > /etc/r2-backup.env && chmod 600 /etc/r2-backup.env'   # paste, then Ctrl+D
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+
+sudo sh -c 'head -c 32 /dev/urandom | base64 | tr -d "/+=" | head -c 32 > /etc/restic-pass'
+sudo chmod 600 /etc/restic-pass
+```
+
+**Save that password somewhere off the device, now.** Without it the backup is
+unrecoverable, by you or by anyone else. It is the one thing a backup cannot restore.
+
+Initialize the repository:
+
+```sh
+sudo sh -c '
+set -a; . /etc/r2-backup.env; set +a
+export RESTIC_PASSWORD_FILE=/etc/restic-pass
+export RESTIC_REPOSITORY=s3:https://<account_id>.r2.cloudflarestorage.com/<bucket>
+restic init'
+```
+
+Then create `/etc/periodic/daily/backup-nas` (mode 700). Back up the data **and** the
+configuration, so a dead phone means reinstalling rather than reconstructing:
+
+```sh
+#!/bin/sh
+set -e
+set -a; . /etc/r2-backup.env; set +a
+export RESTIC_PASSWORD_FILE=/etc/restic-pass
+export RESTIC_REPOSITORY=s3:https://<account_id>.r2.cloudflarestorage.com/<bucket>
+
+# a database inside a container needs a dump; copying its files cold is useless
+mkdir -p /var/backups
+if docker ps --format '{{.Names}}' | grep -qx n8n-db; then
+    docker exec n8n-db pg_dump -U postgres --clean --if-exists n8n > /var/backups/n8n.sql
+fi
+
+restic backup \
+    /srv/nas /var/backups/n8n.sql \
+    /etc/samba/smb.conf /var/lib/adguardhome /var/lib/filebrowser \
+    /etc/conf.d /etc/local.d /etc/periodic/daily /etc/network/interfaces \
+    /etc/sysctl.d /etc/wpa_supplicant /etc/netdata/netdata.conf \
+    --tag nas --host s10 --exclude-caches
+
+restic forget --tag nas --host s10 \
+    --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+```
+
+**Leave the backup credentials out of the backup.** Storing `/etc/restic-pass` and
+`/etc/r2-backup.env` inside the repository they unlock helps nothing during a restore (you
+cannot reach the data without them) and only widens the damage if the repository leaks.
+
+Alpine runs `/etc/periodic/daily` through `crond`, which may be stopped by default:
+
+```sh
+sudo rc-update add crond default
+sudo rc-service crond start
+```
+
+**Then prove it restores.** A backup nobody restored is a guess:
+
+```sh
+sudo sh -c '
+set -a; . /etc/r2-backup.env; set +a
+export RESTIC_PASSWORD_FILE=/etc/restic-pass
+export RESTIC_REPOSITORY=s3:https://<account_id>.r2.cloudflarestorage.com/<bucket>
+restic check
+restic restore latest --target /tmp/verify'
+diff -r /srv/nas /tmp/verify/srv/nas && echo "restore is byte-identical"
+```
+
+Measured on this build: 447 MB uploaded in 3m23 the first time, then 6 seconds and a few
+hundred KB per day once only configuration changes.
+
+## Step 16: Verify it survives a reboot
 
 Nothing is proven until it comes back on its own, because that is what happens on the first
 power cut:
@@ -507,9 +605,8 @@ before chasing it.
 reflashes based on a theory, when `/proc/last_kmsg` and `/proc/cmdline` held the answer the
 whole time. Opening visibility is always cheaper than another flash cycle.
 
-**There is no backup.** A single phone holds a single copy of your files, on storage that
-cannot be swapped if it fails. Mirror `/srv/nas` somewhere else before trusting it with
-anything that matters.
+**Back up before you trust it.** Phone storage is soldered: when it fails, it takes
+everything with it. Step 15 covers this, and the part people skip is testing the restore.
 
 ## Layout
 
